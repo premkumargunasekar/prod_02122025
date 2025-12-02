@@ -1,5 +1,6 @@
 ---
-# Orchestrator role - runs on target host but delegates CSV/GCP sensitive ops to controller when needed
+# roles/gcp_subnet_multi/tasks/main.yml
+# Orchestrator role — runs on the target host and delegates processing to subnet_unit role.
 
 - name: Validate incoming req
   assert:
@@ -7,7 +8,18 @@
       - req is defined
     fail_msg: "Role gcp_subnet_multi requires 'req' variable"
 
-- name: Include subnet_unit role for actual processing
+- name: Ensure required supporting values are defined
+  assert:
+    that:
+      - env_data is defined
+      - subnet_data is defined
+      - region_map is defined
+      - scripts_dir is defined
+      - subnet_csv is defined
+      - gcp_project is defined
+    fail_msg: "Missing one or more required facts: env_data, subnet_data, region_map, scripts_dir, subnet_csv, gcp_project"
+
+- name: Call subnet_unit role for this request
   include_role:
     name: subnet_unit
   vars:
@@ -21,4 +33,3 @@
     subnet_csv: "{{ subnet_csv }}"
     gcp_project: "{{ gcp_project }}"
     gcp_sa_file: "{{ gcp_sa_file | default(omit) }}"
-  delegate_to: "{{ inventory_hostname }}"
