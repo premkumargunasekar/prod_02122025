@@ -45,7 +45,7 @@
 
 
     # ----------------------------------------------------------
-    # READ CSV FILES (ON TARGET HOST, NOT LOCALHOST)
+    # READ CSV FILES (ON TARGET HOST)
     # ----------------------------------------------------------
     - name: Read Env.csv from target host
       community.general.read_csv:
@@ -97,7 +97,7 @@
     # SEND EMAIL (RUN ON CONTROLLER)
     # ----------------------------------------------------------
     - name: Send HTML email
-      mail:
+      community.general.mail:
         host: "{{ email_smtp.host }}"
         port: "{{ email_smtp.port }}"
         username: "{{ email_user }}"
