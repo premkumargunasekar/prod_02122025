@@ -1,14 +1,21 @@
 ---
-# This role runs the per-subnet workflow.
-# Key guarantees:
-# - idempotent: will not create if name or CIDR already present
-# - write to Subnet.csv only after successful GCP creation (atomic append via helper)
-# - rollback: if CSV append fails after GCP creation, the subnet will be removed
-# - retries for GCP create
+# roles/subnet_unit/tasks/main.yml
+# Per-subnet processing executed on the target VM (Option A).
+# Guarantees:
+# - idempotent (checks by name)
+# - only writes to Subnet.csv after GCP creation succeeds
+# - rollback attempt on CSV append failure
+# - retry on GCP creation
 
-- name: Ensure selected_block exists for Region+Env (find in env_data)
+# 1) Find selected block from env_data
+- name: Find selected block for Region+Env
   set_fact:
-    selected_block: "{{ (env_data | selectattr('RegionCode','equalto', req.RegionCode) | selectattr('Env','equalto', req.Env) | list)[0].Block | default(omit) }}"
+    selected_block: >-
+      {{
+        (env_data | selectattr('RegionCode','equalto', req.RegionCode)
+                 | selectattr('Env','equalto', req.Env) | list)
+        | first | default({}) | dict2items | selectattr('key','equalto','Block') | map(attribute='value') | list | first | default(omit)
+      }}
   run_once: false
 
 - name: Fail if block missing
@@ -16,7 +23,8 @@
     msg: "No block found in Env.csv for Region={{ req.RegionCode }} Env={{ req.Env }}"
   when: selected_block is omitted
 
-- name: Determine existing_count for naming
+# 2) Determine naming counter and SubnetName
+- name: Compute existing_count for naming
   set_fact:
     existing_count: >-
       {{
@@ -27,28 +35,34 @@
         | length
       }}
 
-- name: Build SubnetName
+- name: Build SubnetName and next_number
   set_fact:
     next_number: "{{ '%03d' % ((existing_count | int) + 1) }}"
     SubnetName: "{{ req.RegionCode | lower }}-{{ req.Env | lower }}-{{ req.Solution | lower }}-{{ next_number }}-snt"
 
-- name: Check idempotency - already exists by name
+# 3) Idempotency checks
+- name: Check if subnet name already exists in CSV
   set_fact:
     already_exists_by_name: "{{ (subnet_data | default([])) | selectattr('SubnetName','equalto', SubnetName) | list | length > 0 }}"
 
-- name: Calculate next available CIDR (controller, locked)
+- name: Early exit if already exists (by name)
+  debug:
+    msg: "Subnet already exists by name: {{ SubnetName }} — skipping creation."
+  when: already_exists_by_name
+  failed_when: false
+
+- name: Calculate next available CIDR from block (runs on target)
   command:
     argv:
       - /usr/bin/python3
       - "{{ calc_script }}"
-      - "--block"
+      - --block
       - "{{ selected_block }}"
-      - "--size"
-      - "{{ req.SubnetSize }}"
-      - "--subnet-csv"
+      - --size
+      - "{{ req.SubnetSize | string }}"
+      - --subnet-csv
       - "{{ subnet_csv }}"
   register: calc
-  delegate_to: localhost
   changed_when: false
 
 - name: Fail if no CIDR available
@@ -60,17 +74,16 @@
   set_fact:
     new_cidr: "{{ calc.stdout }}"
 
-- name: Validate proposed CIDR does not overlap existing (controller double-check)
+- name: Validate proposed CIDR does not overlap existing (double-check)
   command:
     argv:
       - /usr/bin/python3
       - "{{ calc_script }}"
-      - "--validate"
+      - --validate
       - "{{ new_cidr }}"
-      - "--subnet-csv"
+      - --subnet-csv
       - "{{ subnet_csv }}"
   register: vcheck
-  delegate_to: localhost
   changed_when: false
 
 - name: Fail if validation detects overlap
@@ -78,9 +91,10 @@
     msg: "CIDR {{ new_cidr }} overlaps existing allocations according to validation"
   when: vcheck.stdout != "OK"
 
-- name: Create subnet in GCP with retries (idempotent if already present)
+# 4) Create subnet in GCP (runs on target VM)
+- name: Create subnet in GCP with retries (idempotent)
   block:
-    - name: Create subnet (attempts)
+    - name: Create subnet (attempt block)
       google.cloud.gcp_compute_subnetwork:
         name: "{{ SubnetName }}"
         ip_cidr_range: "{{ new_cidr }}"
@@ -100,23 +114,23 @@
       fail:
         msg: "GCP subnet creation failed for {{ SubnetName }}: {{ gcp_result }}"
 
-- name: Append to Subnet.csv atomically on controller
+# 5) Append to Subnet.csv atomically (only after GCP success)
+- name: Append to Subnet.csv atomically on target
   command:
     argv:
       - /usr/bin/python3
       - "{{ update_script }}"
-      - "--subnet-csv"
+      - --subnet-csv
       - "{{ subnet_csv }}"
-      - "--line"
-      - "{{ req.RegionCode }},{{ req.Env }},{{ new_cidr }},{{ SubnetName }},NetworkTeam,Created,{{ req.Comments }}"
+      - --line
+      - "{{ req.RegionCode }},{{ req.Env }},{{ new_cidr }},{{ SubnetName }},NetworkTeam,Created,{{ req.Comments | default('') }}"
   register: append_result
-  delegate_to: localhost
   changed_when: false
 
-- name: Rollback if CSV append failed (delete created subnet)
+- name: Rollback if CSV append failed (attempt delete)
   when: append_result.rc != 0
   block:
-    - name: Delete subnet due to CSV failure (attempt cleanup)
+    - name: Delete subnet due to CSV failure (cleanup)
       google.cloud.gcp_compute_subnetwork:
         name: "{{ SubnetName }}"
         region: "{{ region_map[req.RegionCode] }}"
@@ -127,11 +141,12 @@
       register: cleanup_result
       ignore_errors: yes
 
-    - name: Fail the task and include cleanup status
+    - name: Fail due to CSV write failure (include cleanup status)
       fail:
         msg: "Failed to append to Subnet.csv and attempted cleanup: {{ cleanup_result }}"
 
-- name: Append result to subnet_report (controller-local)
+# 6) Add result to subnet_report (collected on host facts)
+- name: Append result to subnet_report fact (on the host)
   set_fact:
     subnet_report: "{{ subnet_report + [ {
       'region_code': req.RegionCode,
@@ -143,5 +158,4 @@
       'status': ( 'FAILED' if (append_result is defined and append_result.rc != 0) else 'SUCCESS' ),
       'message': ( append_result.stdout|default('CSV appended') if (append_result is defined and append_result.rc == 0) else (gcp_result.msg | default('GCP created') ) )
     } ] }}"
-  delegate_to: localhost
   run_once: false
