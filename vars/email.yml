@@ -1,0 +1,6 @@
+email_user: "notify@example.com"
+email_password: "change_this"
+email_to: "netops@example.com"
+email_smtp:
+  host: "smtp.gmail.com"
+  port: 587

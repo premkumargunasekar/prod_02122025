@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>GCP Subnet Report</title></head>
+<body>
+<h2>GCP Subnet Creation Report</h2>
+<p>Generated: {{ lookup('pipe','date') }}</p>
+<table border="1" cellpadding="6" cellspacing="0">
+<thead><tr><th>#</th><th>Region</th><th>Env</th><th>Project</th><th>VPC</th><th>Subnet Name</th><th>CIDR</th><th>Status</th><th>Message</th></tr></thead>
+<tbody>
+{% for item in subnet_report %}
+<tr>
+  <td>{{ loop.index }}</td>
+  <td>{{ item.region_code }} ({{ item.region }})</td>
+  <td>{{ item.project }}</td>
+  <td>{{ item.vpc }}</td>
+  <td>{{ item.subnet_name }}</td>
+  <td>{{ item.cidr }}</td>
+  <td>{{ item.status }}</td>
+  <td>{{ item.message }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</body>
+</html>

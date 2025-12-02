@@ -1,0 +1,89 @@
+---
+- name: Multi-Subnet IPAM + GCP Provisioning (Production Ready)
+  hosts: 192.168.116.129
+  gather_facts: no
+  connection: ssh
+
+  vars_files:
+    - vars/common.yml
+    - vars/paths.yml
+    - vars/email.yml
+
+  vars:
+    region_map:
+      AO: asia-south1
+      EU: europe-west1
+      AS: asia-east1
+      NA: us-central1
+
+  tasks:
+    - name: Validate subnets input exists
+      fail:
+        msg: "'subnets' variable missing"
+      when: subnets is not defined
+
+    - name: Validate subnets is list
+      fail:
+        msg: "'subnets' should be a list"
+      when: subnets is not iterable
+
+    - name: Validate max subnets per execution
+      fail:
+        msg: "Max 50 subnets per execution"
+      when: subnets | length > 50
+
+    - name: Init subnet_report
+      set_fact:
+        subnet_report: []
+
+    - name: Read Env.csv from controller
+      read_csv:
+        path: "{{ env_csv }}"
+      delegate_to: localhost
+      run_once: true
+      register: env_raw
+
+    - name: Set env_data fact (controller)
+      set_fact:
+        env_data: "{{ env_raw.list }}"
+      run_once: true
+
+    - name: Read Subnet.csv from controller
+      read_csv:
+        path: "{{ subnet_csv }}"
+      delegate_to: localhost
+      run_once: true
+      register: subnet_raw
+
+    - name: Set subnet_data fact (controller)
+      set_fact:
+        subnet_data: "{{ subnet_raw.list }}"
+      run_once: true
+
+    - name: Process each subnet request using role (parallel safe)
+      include_role:
+        name: gcp_subnet_multi
+      loop: "{{ subnets }}"
+      loop_control:
+        loop_var: req
+        index_var: batch_index
+
+    - name: Render HTML report locally (controller)
+      template:
+        src: "templates/subnet_report.html.j2"
+        dest: "/tmp/subnet_report.html"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Send HTML email (controller) - use ansible-vault for credentials
+      mail:
+        host: "{{ email_smtp.host }}"
+        port: "{{ email_smtp.port }}"
+        username: "{{ email_user }}"
+        password: "{{ email_password }}"
+        to: "{{ email_to }}"
+        subject: "GCP Multi-Subnet Creation Report"
+        subtype: html
+        body: "{{ lookup('file','/tmp/subnet_report.html') }}"
+      delegate_to: localhost
+      run_once: true

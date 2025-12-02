@@ -1,0 +1,3 @@
+env_csv: "/opt/GCP/Env.csv"
+subnet_csv: "/opt/GCP/Subnet.csv"
+scripts_dir: "/opt/GCP/scripts"

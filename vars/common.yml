@@ -1,0 +1,6 @@
+# Example common variables - secrets should be kept in ansible-vault
+gcp_project: "cloud-network-prod-12345"
+scripts_dir: "/opt/GCP/scripts"
+env_csv: "/opt/GCP/Env.csv"
+subnet_csv: "/opt/GCP/Subnet.csv"
+gcp_sa_file: "/opt/GCP/keys/service-account.json"

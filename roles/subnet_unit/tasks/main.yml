@@ -1,0 +1,147 @@
+---
+# This role runs the per-subnet workflow.
+# Key guarantees:
+# - idempotent: will not create if name or CIDR already present
+# - write to Subnet.csv only after successful GCP creation (atomic append via helper)
+# - rollback: if CSV append fails after GCP creation, the subnet will be removed
+# - retries for GCP create
+
+- name: Ensure selected_block exists for Region+Env (find in env_data)
+  set_fact:
+    selected_block: "{{ (env_data | selectattr('RegionCode','equalto', req.RegionCode) | selectattr('Env','equalto', req.Env) | list)[0].Block | default(omit) }}"
+  run_once: false
+
+- name: Fail if block missing
+  fail:
+    msg: "No block found in Env.csv for Region={{ req.RegionCode }} Env={{ req.Env }}"
+  when: selected_block is omitted
+
+- name: Determine existing_count for naming
+  set_fact:
+    existing_count: >-
+      {{
+        (subnet_data | default([]))
+        | selectattr('RegionCode','equalto', req.RegionCode)
+        | selectattr('Env','equalto', req.Env)
+        | list
+        | length
+      }}
+
+- name: Build SubnetName
+  set_fact:
+    next_number: "{{ '%03d' % ((existing_count | int) + 1) }}"
+    SubnetName: "{{ req.RegionCode | lower }}-{{ req.Env | lower }}-{{ req.Solution | lower }}-{{ next_number }}-snt"
+
+- name: Check idempotency - already exists by name
+  set_fact:
+    already_exists_by_name: "{{ (subnet_data | default([])) | selectattr('SubnetName','equalto', SubnetName) | list | length > 0 }}"
+
+- name: Calculate next available CIDR (controller, locked)
+  command:
+    argv:
+      - /usr/bin/python3
+      - "{{ calc_script }}"
+      - "--block"
+      - "{{ selected_block }}"
+      - "--size"
+      - "{{ req.SubnetSize }}"
+      - "--subnet-csv"
+      - "{{ subnet_csv }}"
+  register: calc
+  delegate_to: localhost
+  changed_when: false
+
+- name: Fail if no CIDR available
+  fail:
+    msg: "No available CIDR in block {{ selected_block }}"
+  when: calc.stdout == ""
+
+- name: Set new_cidr fact
+  set_fact:
+    new_cidr: "{{ calc.stdout }}"
+
+- name: Validate proposed CIDR does not overlap existing (controller double-check)
+  command:
+    argv:
+      - /usr/bin/python3
+      - "{{ calc_script }}"
+      - "--validate"
+      - "{{ new_cidr }}"
+      - "--subnet-csv"
+      - "{{ subnet_csv }}"
+  register: vcheck
+  delegate_to: localhost
+  changed_when: false
+
+- name: Fail if validation detects overlap
+  fail:
+    msg: "CIDR {{ new_cidr }} overlaps existing allocations according to validation"
+  when: vcheck.stdout != "OK"
+
+- name: Create subnet in GCP with retries (idempotent if already present)
+  block:
+    - name: Create subnet (attempts)
+      google.cloud.gcp_compute_subnetwork:
+        name: "{{ SubnetName }}"
+        ip_cidr_range: "{{ new_cidr }}"
+        region: "{{ region_map[req.RegionCode] }}"
+        network:
+          selfLink: "https://www.googleapis.com/compute/v1/projects/{{ gcp_project }}/global/networks/{{ req.VPC }}"
+        project: "{{ gcp_project }}"
+        auth_kind: serviceaccount
+        service_account_file: "{{ gcp_sa_file }}"
+        state: present
+      register: gcp_result
+      retries: 3
+      delay: 5
+      until: gcp_result is succeeded
+  rescue:
+    - name: Fail - GCP creation failed after retries
+      fail:
+        msg: "GCP subnet creation failed for {{ SubnetName }}: {{ gcp_result }}"
+
+- name: Append to Subnet.csv atomically on controller
+  command:
+    argv:
+      - /usr/bin/python3
+      - "{{ update_script }}"
+      - "--subnet-csv"
+      - "{{ subnet_csv }}"
+      - "--line"
+      - "{{ req.RegionCode }},{{ req.Env }},{{ new_cidr }},{{ SubnetName }},NetworkTeam,Created,{{ req.Comments }}"
+  register: append_result
+  delegate_to: localhost
+  changed_when: false
+
+- name: Rollback if CSV append failed (delete created subnet)
+  when: append_result.rc != 0
+  block:
+    - name: Delete subnet due to CSV failure (attempt cleanup)
+      google.cloud.gcp_compute_subnetwork:
+        name: "{{ SubnetName }}"
+        region: "{{ region_map[req.RegionCode] }}"
+        project: "{{ gcp_project }}"
+        auth_kind: serviceaccount
+        service_account_file: "{{ gcp_sa_file }}"
+        state: absent
+      register: cleanup_result
+      ignore_errors: yes
+
+    - name: Fail the task and include cleanup status
+      fail:
+        msg: "Failed to append to Subnet.csv and attempted cleanup: {{ cleanup_result }}"
+
+- name: Append result to subnet_report (controller-local)
+  set_fact:
+    subnet_report: "{{ subnet_report + [ {
+      'region_code': req.RegionCode,
+      'region': region_map[req.RegionCode],
+      'project': gcp_project,
+      'vpc': req.VPC,
+      'subnet_name': SubnetName,
+      'cidr': new_cidr,
+      'status': ( 'FAILED' if (append_result is defined and append_result.rc != 0) else 'SUCCESS' ),
+      'message': ( append_result.stdout|default('CSV appended') if (append_result is defined and append_result.rc == 0) else (gcp_result.msg | default('GCP created') ) )
+    } ] }}"
+  delegate_to: localhost
+  run_once: false
