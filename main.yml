@@ -17,6 +17,9 @@
       NA: us-central1
 
   tasks:
+    # ----------------------------------------------------------
+    # VALIDATION
+    # ----------------------------------------------------------
     - name: Validate subnets input exists
       fail:
         msg: "'subnets' variable missing"
@@ -32,35 +35,45 @@
         msg: "Max 50 subnets per execution"
       when: subnets | length > 50
 
+
+    # ----------------------------------------------------------
+    # INITIALIZE REPORT LIST
+    # ----------------------------------------------------------
     - name: Init subnet_report
       set_fact:
         subnet_report: []
 
-    - name: Read Env.csv from controller
-      read_csv:
+
+    # ----------------------------------------------------------
+    # READ CSV FILES (ON TARGET HOST, NOT LOCALHOST)
+    # ----------------------------------------------------------
+    - name: Read Env.csv from target host
+      community.general.read_csv:
         path: "{{ env_csv }}"
-      delegate_to: localhost
       run_once: true
       register: env_raw
 
-    - name: Set env_data fact (controller)
+    - name: Set env_data fact
       set_fact:
         env_data: "{{ env_raw.list }}"
       run_once: true
 
-    - name: Read Subnet.csv from controller
-      read_csv:
+    - name: Read Subnet.csv from target host
+      community.general.read_csv:
         path: "{{ subnet_csv }}"
-      delegate_to: localhost
       run_once: true
       register: subnet_raw
 
-    - name: Set subnet_data fact (controller)
+    - name: Set subnet_data fact
       set_fact:
         subnet_data: "{{ subnet_raw.list }}"
       run_once: true
 
-    - name: Process each subnet request using role (parallel safe)
+
+    # ----------------------------------------------------------
+    # PROCESS EACH SUBNET
+    # ----------------------------------------------------------
+    - name: Process each subnet request
       include_role:
         name: gcp_subnet_multi
       loop: "{{ subnets }}"
@@ -68,14 +81,22 @@
         loop_var: req
         index_var: batch_index
 
-    - name: Render HTML report locally (controller)
+
+    # ----------------------------------------------------------
+    # GENERATE HTML REPORT (RUN ON CONTROLLER)
+    # ----------------------------------------------------------
+    - name: Render HTML report locally
       template:
         src: "templates/subnet_report.html.j2"
         dest: "/tmp/subnet_report.html"
       delegate_to: localhost
       run_once: true
 
-    - name: Send HTML email (controller) - use ansible-vault for credentials
+
+    # ----------------------------------------------------------
+    # SEND EMAIL (RUN ON CONTROLLER)
+    # ----------------------------------------------------------
+    - name: Send HTML email
       mail:
         host: "{{ email_smtp.host }}"
         port: "{{ email_smtp.port }}"
@@ -84,6 +105,6 @@
         to: "{{ email_to }}"
         subject: "GCP Multi-Subnet Creation Report"
         subtype: html
-        body: "{{ lookup('file','/tmp/subnet_report.html') }}"
+        body: "{{ lookup('file', '/tmp/subnet_report.html') }}"
       delegate_to: localhost
       run_once: true
